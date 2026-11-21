@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 from typing import Any
+from unicodedata import name
 
 import httpx
 
@@ -100,7 +101,10 @@ class ERPNextClient:
             http_method="POST",
             doc=json.dumps(doc),
         )
-
+    # async def submit_doc(self, doctype: str, name: str) -> dict:
+    #    return await self.update_doc(doctype, name, {"docstatus": 1})
+   
+   
     async def cancel_doc(self, doctype: str, name: str) -> dict:
         return await self.call_method(
             "frappe.client.cancel",

@@ -40,8 +40,13 @@ uv sync
 ## Run
 
 ```bash
-set -a && source .env && set +a && uv run erpnext-mcp
+uv run erpnext-mcp
 ```
+
+The Streamable HTTP MCP endpoint is available at `http://127.0.0.1:8000/mcp`
+by default. Configure `ERPNEXT_MCP_HOST`, `ERPNEXT_MCP_PORT`, and
+`ERPNEXT_MCP_PATH` in `.env` to change it. For a public deployment, bind to an
+appropriate interface and place the service behind an HTTPS reverse proxy.
 
 ## Available Tools
 
@@ -78,19 +83,15 @@ set -a && source .env && set +a && uv run erpnext-mcp
 
 ## MCP Client Configuration
 
-Add to your MCP client config (e.g. Claude Desktop `claude_desktop_config.json`):
+Start the server, then add its HTTP endpoint to your MCP client (for example,
+Claude Desktop's `claude_desktop_config.json`):
 
 ```json
 {
   "mcpServers": {
     "erpnext": {
-      "command": "uv",
-      "args": ["--directory", "/path/to/erpnext-mcp", "run", "erpnext-mcp"],
-      "env": {
-        "ERPNEXT_URL": "https://your-erpnext-instance.com",
-        "ERPNEXT_API_KEY": "your_api_key",
-        "ERPNEXT_API_SECRET": "your_api_secret"
-      }
+      "type": "http",
+      "url": "http://127.0.0.1:8000/mcp"
     }
   }
 }

@@ -699,7 +699,19 @@ async def get_customer_details(name: str | None = None, keyword: str | None = No
 
 
 def main():
-    mcp.run()
+    """Run the MCP server over Streamable HTTP.
+
+    The endpoint defaults to http://127.0.0.1:9000/mcp.  These settings can
+    be overridden for a container or a reverse-proxy deployment with
+    ERPNEXT_MCP_HOST, ERPNEXT_MCP_PORT (or PORT), and ERPNEXT_MCP_PATH.
+    """
+    host = os.environ.get("ERPNEXT_MCP_HOST", "127.0.0.1")
+    port = int(os.environ.get("ERPNEXT_MCP_PORT", os.environ.get("PORT", "8000")))
+    path = os.environ.get("ERPNEXT_MCP_PATH", "/mcp")
+    if not path.startswith("/"):
+        path = f"/{path}"
+
+    mcp.run("streamable-http", host=host, port=port, path=path)
 
 
 if __name__ == "__main__":
