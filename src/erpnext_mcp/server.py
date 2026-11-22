@@ -1,4 +1,5 @@
 from __future__ import annotations
+import functools
 import json
 import os
 from typing import Any
@@ -6,13 +7,41 @@ from typing import Any
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 
-from .client import ERPNextClient
+from .client import ERPNextClient, ERPNextError
 
 load_dotenv()
+def friendly_errors(fn):
+    """Convert exceptions into structured dicts the LLM can reason about.
 
+    FastMCP turns raised exceptions into opaque `ToolError: <str(exc)>` messages.
+    Returning a dict instead lets the agent see error type, status, and
+    Frappe's server_messages — enabling self-correction.
+    """
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await fn(*args, **kwargs)
+        except ERPNextError as e:
+            result: dict[str, Any] = {
+                "error": True,
+                "status": e.status,
+                "exc_type": e.exc_type,
+                "message": e.message,
+            }
+            if e.server_messages:
+                result["details"] = e.server_messages
+            return result
+        except Exception as e:
+            return {
+                "error": True,
+                "status": 0,
+                "exc_type": type(e).__name__,
+                "message": str(e),
+            }
+    return wrapper
 mcp = FastMCP(
     "ERPNext",
-    instructions="MCP Server for ERPNext REST API - CRUD, reports, workflow operations",
+    instructions="MCP Server for ERPNext REST API - CRUD, reports, workflow operations,Before deleting any document, call get_linked_docs() to check dependencies.",
 )
 
 _client: ERPNextClient | None = None
@@ -32,6 +61,7 @@ def get_client() -> ERPNextClient:
 
 
 @mcp.tool()
+@friendly_errors
 async def list_documents(
     doctype: str,
     fields: list[str] | None = None,
@@ -61,6 +91,7 @@ async def list_documents(
 
 
 @mcp.tool()
+@friendly_errors
 async def get_document(doctype: str, name: str, fields: list[str] | None = None) -> dict:
     """Get a single document by DocType and name.
 
@@ -73,6 +104,7 @@ async def get_document(doctype: str, name: str, fields: list[str] | None = None)
 
 
 @mcp.tool()
+@friendly_errors
 async def create_document(doctype: str, data: str) -> dict:
     """Create a new document.
 
@@ -84,6 +116,7 @@ async def create_document(doctype: str, data: str) -> dict:
 
 
 @mcp.tool()
+@friendly_errors
 async def update_document(doctype: str, name: str, data: str) -> dict:
     """Update an existing document.
 
@@ -96,6 +129,7 @@ async def update_document(doctype: str, name: str, data: str) -> dict:
 
 
 @mcp.tool()
+@friendly_errors
 async def delete_document(doctype: str, name: str) -> dict:
     """Delete a document.
 
@@ -109,19 +143,47 @@ async def delete_document(doctype: str, name: str) -> dict:
 # ── Reports ───────────────────────────────────────────
 
 
+# @mcp.tool()
+# @friendly_errors
+# async def run_report(report_name: str, filters: str | None = None) -> Any:
+#     """Execute an ERPNext report.
+
+#     Args:
+#         report_name: Name of the report
+#         filters: Optional JSON string of report filters
+#     """
+#     f = json.loads(filters) if filters else None
+#     return await get_client().get_report(report_name, filters=f)
+
 @mcp.tool()
-async def run_report(report_name: str, filters: str | None = None) -> Any:
+@friendly_errors
+async def run_report(
+    report_name: str,
+    filters: str | None = None,
+    ignore_prepared_report: bool = False,
+) -> Any:
     """Execute an ERPNext report.
 
+    ⚠️ For long-running reports (Stock Balance, General Ledger, Profit & Loss),
+    ERPNext may return a **cached** result that can be hours or days old.
+    Set `ignore_prepared_report=True` to force a fresh execution when
+    up-to-date numbers matter.
+
     Args:
-        report_name: Name of the report
+        report_name: Name of the report (e.g. "Stock Balance")
         filters: Optional JSON string of report filters
+        ignore_prepared_report: If True, bypass cached prepared reports
+            and re-execute from scratch (slower but current)
     """
     f = json.loads(filters) if filters else None
-    return await get_client().get_report(report_name, filters=f)
-
+    return await get_client().get_report(
+        report_name,
+        filters=f,
+        ignore_prepared_report=ignore_prepared_report,
+    )
 
 @mcp.tool()
+@friendly_errors
 async def get_count(doctype: str, filters: str | None = None) -> int:
     """Get document count for a DocType with optional filters.
 
@@ -134,6 +196,7 @@ async def get_count(doctype: str, filters: str | None = None) -> int:
 
 
 @mcp.tool()
+@friendly_errors
 async def get_list_with_summary(
     doctype: str,
     fields: list[str] | None = None,
@@ -161,6 +224,7 @@ async def get_list_with_summary(
 
 
 @mcp.tool()
+@friendly_errors
 async def submit_document(doctype: str, name: str) -> dict:
     """Submit a submittable document (e.g. Sales Invoice).
 
@@ -172,6 +236,7 @@ async def submit_document(doctype: str, name: str) -> dict:
 
 
 @mcp.tool()
+@friendly_errors
 async def cancel_document(doctype: str, name: str) -> dict:
     """Cancel a submitted document.
 
@@ -183,6 +248,7 @@ async def cancel_document(doctype: str, name: str) -> dict:
 
 
 @mcp.tool()
+@friendly_errors
 async def run_method(method: str, http_method: str = "POST", args: str | None = None) -> Any:
     """Call a server-side method (whitelisted API).
 
@@ -199,6 +265,7 @@ async def run_method(method: str, http_method: str = "POST", args: str | None = 
 
 
 @mcp.tool()
+@friendly_errors
 async def list_doctypes(module: str | None = None, is_submittable: bool | None = None, limit: int = 100) -> list[str]:
     """List all available DocType names.
 
@@ -220,6 +287,7 @@ async def list_doctypes(module: str | None = None, is_submittable: bool | None =
 
 
 @mcp.tool()
+@friendly_errors
 async def search_link(doctype: str, txt: str, filters: str | None = None, page_length: int = 20) -> list:
     """Search for link field values (autocomplete).
 
@@ -233,36 +301,82 @@ async def search_link(doctype: str, txt: str, filters: str | None = None, page_l
     return await get_client().search_link(doctype, txt, filters=f, page_length=page_length)
 
 
+# @mcp.tool()
+# async def get_doctype_meta(doctype: str) -> list:
+#     """Get field definitions for a DocType.
+
+#     Args:
+#         doctype: ERPNext DocType name
+#     """
+#     return await get_client().get_doctype_meta(doctype)
+
 @mcp.tool()
-async def get_doctype_meta(doctype: str) -> list:
-    """Get field definitions for a DocType.
+@friendly_errors
+async def get_doctype_meta(doctype: str) -> dict:
+    """Get complete metadata for a DocType: fields, permissions, and structural flags.
+
+    Use this before attempting create/update/submit operations to learn:
+    - which fields exist and whether they're required (`reqd`) or conditional (`depends_on`)
+    - whether the doc is submittable (`is_submittable`) — determines if submit/cancel apply
+    - whether it's a singleton (`issingle`) or child table (`istable`) — affects how to fetch it
+    - which roles can read / write / submit / cancel (`permissions`)
 
     Args:
-        doctype: ERPNext DocType name
+        doctype: ERPNext DocType name (e.g. "Sales Order", "Item", "Customer")
     """
     return await get_client().get_doctype_meta(doctype)
-
-
 # ── Inventory & Trading ──────────────────────────────
 
 
-@mcp.tool()
-async def get_stock_balance(item_code: str | None = None, warehouse: str | None = None) -> list[dict]:
-    """Get real-time stock balance from Bin (exact match on item_code).
+# @mcp.tool()
+# async def get_stock_balance(item_code: str | None = None, warehouse: str | None = None) -> list[dict]:
+#     """Get real-time stock balance from Bin (exact match on item_code).
 
-    ⚠️ 此工具對 item_code 做**精確比對**。回傳空陣列代表「找不到對應 Bin 紀錄」，
-    可能是真的零庫存，也可能是 item_code 拼錯或缺少公司前綴（例如系統實際是
-    `CTOS-KV-N40DT` 而你只查了 `KV-N40DT`）。**若回傳空陣列，請改用
-    `find_items(keyword=...)` 或 `get_item_details(keyword=...)` 模糊確認**。
+#     ⚠️ 此工具對 item_code 做**精確比對**。回傳空陣列代表「找不到對應 Bin 紀錄」，
+#     可能是真的零庫存，也可能是 item_code 拼錯或缺少公司前綴（例如系統實際是
+#     `CTOS-KV-N40DT` 而你只查了 `KV-N40DT`）。**若回傳空陣列，請改用
+#     `find_items(keyword=...)` 或 `get_item_details(keyword=...)` 模糊確認**。
+
+#     Args:
+#         item_code: Optional exact item code to filter
+#         warehouse: Optional warehouse to filter
+#     """
+#     return await get_client().get_stock_balance(item_code=item_code, warehouse=warehouse)
+
+# new-------
+@mcp.tool()
+@friendly_errors
+async def get_stock_balance(
+    item_code: str | None = None,
+    warehouse: str | None = None,
+    limit: int = 500,
+) -> list[dict]:
+    """Get real-time stock balance from Bin.
+
+    **At least one of `item_code` or `warehouse` is required.** Calling with
+    no filters is intentionally blocked because it would scan every row in
+    the Bin table (potentially 100k+ rows, multi-minute server load).
+    To browse all stock, use `find_items()` first to resolve item codes,
+    then query per item.
+
+    ⚠️ `item_code` is matched **exactly**. Empty result means "no Bin row
+    matched" — either genuinely zero stock, or the code is wrong/missing a
+    company prefix (e.g. the system stores `CTOS-KV-N40DT` but you queried
+    `KV-N40DT`). If you get an empty array, call `find_items(keyword=...)`
+    or `get_item_details(keyword=...)` to resolve the real item_code first.
 
     Args:
-        item_code: Optional exact item code to filter
-        warehouse: Optional warehouse to filter
+        item_code: Exact item code to filter. Required unless `warehouse` is set.
+        warehouse: Warehouse name to filter. Required unless `item_code` is set.
+        limit: Max rows to return (default 500). Increase only if you know
+               the item has many warehouses/locations.
     """
-    return await get_client().get_stock_balance(item_code=item_code, warehouse=warehouse)
-
-
+    return await get_client().get_stock_balance(
+        item_code=item_code, warehouse=warehouse, limit=limit,
+    )
+    
 @mcp.tool()
+@friendly_errors
 async def get_item_price(item_code: str, price_list: str | None = None) -> list[dict]:
     """Get item prices from Item Price records (exact match on item_code).
 
@@ -277,6 +391,7 @@ async def get_item_price(item_code: str, price_list: str | None = None) -> list[
 
 
 @mcp.tool()
+@friendly_errors
 async def make_mapped_doc(method: str, source_name: str) -> dict:
     """Create a new document mapped from an existing one (document conversion).
 
@@ -296,6 +411,7 @@ async def make_mapped_doc(method: str, source_name: str) -> dict:
 
 
 @mcp.tool()
+@friendly_errors
 async def get_party_balance(party_type: str, party: str) -> Any:
     """Get outstanding balance for a Customer or Supplier.
 
@@ -307,6 +423,7 @@ async def get_party_balance(party_type: str, party: str) -> Any:
 
 
 @mcp.tool()
+@friendly_errors
 async def get_stock_ledger(item_code: str | None = None, warehouse: str | None = None, limit: int = 50) -> list[dict]:
     """Get stock ledger entries (inventory transaction history; exact match on item_code).
 
@@ -321,6 +438,7 @@ async def get_stock_ledger(item_code: str | None = None, warehouse: str | None =
 
 
 @mcp.tool()
+@friendly_errors
 async def find_items(
     keyword: str,
     item_group: str | None = None,
@@ -357,6 +475,7 @@ async def find_items(
 
 
 @mcp.tool()
+@friendly_errors
 async def get_item_details(
     name: str | None = None,
     keyword: str | None = None,
@@ -394,6 +513,7 @@ async def get_item_details(
 
 
 @mcp.tool()
+@friendly_errors
 async def upload_file_from_url(
     file_url: str,
     filename: str | None = None,
@@ -423,6 +543,7 @@ async def upload_file_from_url(
 
 
 @mcp.tool()
+@friendly_errors
 async def upload_file(
     file_path: str,
     filename: str | None = None,
@@ -464,6 +585,7 @@ async def upload_file(
 
 
 @mcp.tool()
+@friendly_errors
 async def list_files(
     attached_to_doctype: str | None = None,
     attached_to_name: str | None = None,
@@ -490,6 +612,7 @@ async def list_files(
 
 
 @mcp.tool()
+@friendly_errors
 async def get_file_url(file_name: str) -> str:
     """Get the full download URL for a file.
 
@@ -502,28 +625,52 @@ async def get_file_url(file_name: str) -> str:
     return await get_client().get_file_url(file_name)
 
 
+# @mcp.tool()
+# @friendly_errors
+# async def download_file(file_name: str) -> dict:
+#     """Download a file's content from ERPNext.
+
+#     Args:
+#         file_name: The File document name
+
+#     Returns:
+#         Dict with 'content_base64' (file content as base64) and 'filename' (original filename)
+#     """
+#     import base64
+#     content, filename = await get_client().download_file(file_name)
+#     return {
+#         "content_base64": base64.b64encode(content).decode("utf-8"),
+#         "filename": filename,
+#     }
 @mcp.tool()
-async def download_file(file_name: str) -> dict:
-    """Download a file's content from ERPNext.
+@friendly_errors
+async def download_file(
+    file_name: str,
+    max_bytes: int = 20 * 1024 * 1024,
+) -> dict:
+    """Download a file's content from ERPNext (base64-encoded).
+
+    For files larger than the limit, use `get_file_url()` instead and
+    open the URL in a browser — base64 responses that big will overflow
+    the model's context window.
 
     Args:
         file_name: The File document name
-
-    Returns:
-        Dict with 'content_base64' (file content as base64) and 'filename' (original filename)
+        max_bytes: Maximum file size to download (default 20 MB)
     """
     import base64
-    content, filename = await get_client().download_file(file_name)
+    content, filename = await get_client().download_file(file_name, max_bytes=max_bytes)
     return {
         "content_base64": base64.b64encode(content).decode("utf-8"),
         "filename": filename,
+        "size_bytes": len(content),
     }
-
 
 # ── Supplier/Customer Details ──────────────────────────
 
 
 @mcp.tool()
+@friendly_errors
 async def get_supplier_details(name: str | None = None, keyword: str | None = None) -> dict:
     """Get complete supplier details including address, phone, and contacts.
 
@@ -612,6 +759,7 @@ async def get_supplier_details(name: str | None = None, keyword: str | None = No
 
 
 @mcp.tool()
+@friendly_errors
 async def get_customer_details(name: str | None = None, keyword: str | None = None) -> dict:
     """Get complete customer details including address, phone, and contacts.
 
@@ -696,7 +844,283 @@ async def get_customer_details(name: str | None = None, keyword: str | None = No
         "our_contacts": our_contacts,
         "their_contacts": their_contacts,
     }
+# ── Doc info & inspection ─────────────────────────────
 
+
+@mcp.tool()
+@friendly_errors
+async def get_doc_info(doctype: str, name: str) -> dict:
+    """Get summary info about a document: status, workflow_state, assignees,
+    comment/attachment counts, timestamps, tags.
+
+    Much cheaper than `get_document` when you only need metadata. Use this to
+    answer "who's working on this?", "is it submitted?", "has it been touched
+    recently?" without pulling child tables.
+
+    Args:
+        doctype: ERPNext DocType name
+        name: Document name/ID
+    """
+    return await get_client().get_doc_info(doctype, name)
+
+
+@mcp.tool()
+@friendly_errors
+async def get_linked_docs(doctype: str, name: str) -> dict:
+    """Check which submitted documents link to this one.
+
+    Call before `delete_document` to know whether ERPNext will block the
+    delete. `can_delete: true` means no submitted links exist.
+
+    Args:
+        doctype: ERPNext DocType name
+        name: Document name/ID
+    """
+    return await get_client().get_linked_docs(doctype, name)
+
+
+@mcp.tool()
+@friendly_errors
+async def get_timeline(doctype: str, name: str, limit: int = 50) -> dict:
+    """Get a document's full history: comments, version changes, emails.
+
+    Returns `{comments, versions, communications}`. Use this to answer
+    "what happened with this document?" or "who changed the price?".
+    Version entries include field-level old→new diffs in `data.changed`.
+
+    Args:
+        doctype: ERPNext DocType name
+        name: Document name/ID
+        limit: Max records per category (default 50)
+    """
+    return await get_client().get_timeline(doctype, name, limit=limit)
+
+
+@mcp.tool()
+@friendly_errors
+async def add_comment(doctype: str, name: str, text: str) -> dict:
+    """Add a comment to a document (visible in the form's Activity timeline).
+
+    Args:
+        doctype: ERPNext DocType name
+        name: Document name/ID
+        text: Comment body (plain text or HTML)
+    """
+    return await get_client().add_comment(doctype, name, text)
+
+
+# ── Workflow ──────────────────────────────────────────
+
+
+@mcp.tool()
+@friendly_errors
+async def get_workflow_actions(doctype: str, name: str) -> list[dict]:
+    """List workflow transitions available for a document.
+
+    Each entry: `{action, next_state, allowed}`. `allowed=false` means the
+    action exists but the current user / doc state blocks it.
+
+    Call before `apply_workflow` so you know which actions are valid, and
+    only surface the ones with `allowed: true`.
+
+    Args:
+        doctype: ERPNext DocType name
+        name: Document name/ID
+    """
+    return await get_client().get_workflow_actions(doctype, name)
+
+
+@mcp.tool()
+@friendly_errors
+async def apply_workflow(doctype: str, name: str, action: str) -> dict:
+    """Apply a workflow action (e.g. "Approve", "Reject", "Send to Finance").
+
+    The doc's `workflow_state` will change on success. Use
+    `get_workflow_actions` first to confirm `action` is valid and allowed.
+
+    Args:
+        doctype: ERPNext DocType name
+        name: Document name/ID
+        action: Workflow action label, exactly as returned by
+            `get_workflow_actions` (case-sensitive)
+    """
+    return await get_client().apply_workflow(doctype, name, action)
+
+
+# ── Permissions & defaults ────────────────────────────
+
+
+@mcp.tool()
+@friendly_errors
+async def get_permissions(doctype: str, doc_name: str | None = None) -> dict:
+    """Check the current user's effective permissions on a DocType.
+
+    Returns `{read, write, create, submit, cancel, delete, amend}` → bool.
+    If `doc_name` is given, evaluates against that specific document
+    (respects owner / workflow-state rules that override role permissions).
+
+    Args:
+        doctype: ERPNext DocType name
+        doc_name: Optional document name for per-doc evaluation
+    """
+    return await get_client().get_permissions(doctype, doc_name=doc_name)
+
+
+@mcp.tool()
+@friendly_errors
+async def get_defaults() -> dict:
+    """Get system-wide defaults: company, currency, warehouse, price lists, fiscal year.
+
+    Call once at the start of a session so you don't have to ask the user
+    "which company?", "which price list?", "which warehouse?" — the answers
+    are usually here.
+    """
+    return await get_client().get_defaults()
+
+
+# ── Field-level fast path ─────────────────────────────
+
+
+@mcp.tool()
+@friendly_errors
+async def get_value(
+    doctype: str,
+    name: str,
+    field: str | list[str],
+) -> dict:
+    """Fetch one (or several) fields from a document — much cheaper than get_document.
+
+    Args:
+        doctype: ERPNext DocType name
+        name: Document name/ID
+        field: Field name (string) or list of field names
+
+    Returns:
+        `{fieldname: value, ...}` — only the requested fields.
+    """
+    return await get_client().get_value(doctype, name, field)
+
+
+@mcp.tool()
+@friendly_errors
+async def set_value(
+    doctype: str,
+    name: str,
+    field: str | dict[str, Any],
+    value: Any = None,
+) -> dict:
+    """Update one (or several) fields on a document — much cheaper than update_document.
+
+    Single field: `set_value("Sales Order", "SO-0042", "delivery_date", "2025-01-15")`
+    Multiple fields: `set_value("Sales Order", "SO-0042", {"delivery_date": "...", "po_no": "X"})`
+
+    Skips the fetch-modify-save cycle, so no stale-modified errors.
+
+    Args:
+        doctype: ERPNext DocType name
+        name: Document name/ID
+        field: Field name (string) OR dict of `{fieldname: new_value}`
+        value: New value for the single field (ignored when `field` is a dict)
+    """
+    return await get_client().set_value(doctype, name, field, value)
+
+
+# ── Rename & bulk operations ──────────────────────────
+
+
+@mcp.tool()
+@friendly_errors
+async def rename_document(
+    doctype: str,
+    old_name: str,
+    new_name: str,
+    merge: bool = False,
+) -> dict:
+    """Rename a document. All links to old_name are rewritten automatically.
+
+    Args:
+        doctype: ERPNext DocType name
+        old_name: Current document name/ID
+        new_name: New document name/ID
+        merge: If True and new_name already exists, merge old into new
+    """
+    return await get_client().rename_document(
+        doctype, old_name, new_name, merge=merge,
+    )
+
+
+@mcp.tool()
+@friendly_errors
+async def bulk_create(
+    doctype: str,
+    items: str,
+    concurrency: int = 1,
+) -> dict:
+    """Create many documents of the same DocType in one call.
+
+    Returns per-row `{index, ok, name | error}` so partial failures are visible.
+    `succeeded` and `failed` counts at the top level.
+
+    Args:
+        doctype: ERPNext DocType name
+        items: JSON string — array of dicts, one per new doc, e.g.
+            '[{"item_code": "X", "item_name": "Y"}, ...]'
+        concurrency: 1 = sequential (safe); >1 = parallel (capped at N)
+    """
+    parsed = json.loads(items) if isinstance(items, str) else items
+    if not isinstance(parsed, list):
+        return {"error": True, "message": "items must be a JSON array of objects"}
+    return await get_client().bulk_create(
+        doctype, parsed, concurrency=concurrency,
+    )
+    
+@mcp.tool()
+@friendly_errors
+async def find_docs(
+    doctype: str,
+    keyword: str,
+    search_fields: list[str] | None = None,
+    filters: str | None = None,
+    limit: int = 20,
+) -> list[dict]:
+    """Fuzzy-search documents of any DocType across one or more fields.
+
+    Runs `OR (field1 LIKE %kw% OR field2 LIKE %kw% ...)` in one query. Use
+    this whenever the user gives a partial / human-typed identifier and you
+    need the exact `name` before calling `get_document`, `get_stock_balance`,
+    `set_value`, etc.
+
+    Common (doctype, search_fields) pairs:
+      - Item     → ["item_name", "item_code"]
+      - Customer → ["customer_name"]
+      - Supplier → ["supplier_name"]
+      - Sales Order / Sales Invoice → ["name", "customer"]  (name is already the doc ID)
+      - Employee → ["employee_name", "name"]
+      - Lead     → ["lead_name", "company_name"]
+
+    Returns matching docs (default fields = name + search_fields).
+
+    Args:
+        doctype: DocType to search in (e.g. "Item", "Customer")
+        keyword: text to search for (case-insensitive, partial match)
+        search_fields: fields to OR-match against. Defaults to ["name"].
+            Almost always should include a human-readable field like
+            item_name / customer_name, not just "name".
+        filters: optional JSON string of AND filters. Either
+            '{"status":"Open"}' or '[["Item","disabled","=",0]]'
+        limit: max rows (default 20)
+
+    Returns:
+        List of dicts matching the docs. Empty list means no matches.
+    """
+    f = json.loads(filters) if filters else None
+    return await get_client().find_docs(
+        doctype=doctype,
+        keyword=keyword,
+        search_fields=search_fields,
+        filters=f,
+        limit=limit,
+    )
 
 def main():
     """Run the MCP server over Streamable HTTP.
@@ -711,7 +1135,10 @@ def main():
     if not path.startswith("/"):
         path = f"/{path}"
 
-    mcp.run("streamable-http", host=host, port=port, path=path)
+    if os.environ.get("ERPNEXT_MCP_TRANSPORT") == "stdio":
+     mcp.run("stdio")
+    else:
+     mcp.run("streamable-http", host=host, port=port, path=path)
 
 
 if __name__ == "__main__":
